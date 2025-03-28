@@ -1,0 +1,13 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:=latest}
+  build:
+    commands:
+      - docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
+  post_build:
+    commands:
+      - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG 

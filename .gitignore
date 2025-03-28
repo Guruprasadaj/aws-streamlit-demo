@@ -1,0 +1,17 @@
+# Virtual Environment
+venv/
+__pycache__/
+*.pyc
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+.DS_Store 
