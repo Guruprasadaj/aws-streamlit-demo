@@ -41,6 +41,14 @@ resource "aws_security_group" "app_sg" {
     description = "HTTP"
   }
 
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SSH access"
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -59,7 +67,7 @@ resource "aws_instance" "app_server" {
   ami           = "ami-0230bd60aa48260c6"
   instance_type = "t2.micro"
   subnet_id     = aws_subnet.public.id
-
+  key_name      = aws_key_pair.app_key.key_name
   vpc_security_group_ids = [aws_security_group.app_sg.id]
 
   tags = {
@@ -104,7 +112,13 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Update the ECS task definition to use the VPC and IAM role
+# Add ECS execution permissions
+resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Update the ECS task definition
 resource "aws_ecs_task_definition" "app" {
   family                   = "${var.app_name}-task"
   requires_compatibilities = ["FARGATE"]
@@ -117,6 +131,14 @@ resource "aws_ecs_task_definition" "app" {
     {
       name  = var.app_name
       image = "${aws_ecr_repository.app.repository_url}:latest"
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/${var.app_name}"
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "ecs"
+        }
+      }
       portMappings = [
         {
           containerPort = 8501
@@ -190,7 +212,13 @@ resource "aws_iam_role" "codebuild_role" {
   })
 }
 
-# Add CodeBuild Project
+# Add GitHub connection for CodeBuild
+resource "aws_codestarconnections_connection" "github" {
+  name          = "github-connection"
+  provider_type = "GitHub"
+}
+
+# Update CodeBuild project source
 resource "aws_codebuild_project" "app_build" {
   name         = "streamlit-app-build"
   description  = "Builds Streamlit app Docker image"
@@ -213,10 +241,17 @@ resource "aws_codebuild_project" "app_build" {
   }
 
   source {
-    type = "GITHUB"
-    location = "https://github.com/Guruprasadaj/aws-streamlit-demo.git"
-    buildspec = "buildspec.yml"
+    type            = "GITHUB"
+    location        = "https://github.com/Guruprasadaj/aws-streamlit-demo.git"
+    buildspec       = "buildspec.yml"
+    git_clone_depth = 1
+
+    git_submodules_config {
+      fetch_submodules = true
+    }
   }
+
+  source_version = "main"
 }
 
 # Add Application Auto Scaling
@@ -291,4 +326,80 @@ resource "aws_iam_role_policy" "codebuild_policy" {
       }
     ]
   })
+}
+
+# Create a key pair
+resource "aws_key_pair" "app_key" {
+  key_name   = "${var.app_name}-key"
+  public_key = tls_private_key.app_key.public_key_openssh
+}
+
+# Generate private key
+resource "tls_private_key" "app_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Store private key locally
+resource "local_file" "private_key" {
+  content  = tls_private_key.app_key.private_key_pem
+  filename = "${path.module}/${var.app_name}-key.pem"
+
+  provisioner "local-exec" {
+    command = "chmod 400 ${path.module}/${var.app_name}-key.pem"
+  }
+}
+
+# Add CloudWatch log group
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.app_name}"
+  retention_in_days = 14
+}
+
+# Add CloudWatch Alarms for CPU and Memory
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  alarm_name          = "${var.app_name}-cpu-utilization-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name        = "CPUUtilization"
+  namespace          = "AWS/ECS"
+  period            = "300"
+  statistic         = "Average"
+  threshold         = "80"
+  alarm_description = "CPU utilization is too high"
+  alarm_actions     = []  # Add SNS topic ARN here if you want notifications
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.app.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "memory_high" {
+  alarm_name          = "${var.app_name}-memory-utilization-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name        = "MemoryUtilization"
+  namespace          = "AWS/ECS"
+  period            = "300"
+  statistic         = "Average"
+  threshold         = "80"
+  alarm_description = "Memory utilization is too high"
+  alarm_actions     = []  # Add SNS topic ARN here if you want notifications
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.app.name
+  }
+}
+
+# Optional: Add SNS Topic for notifications
+resource "aws_sns_topic" "monitoring" {
+  name = "${var.app_name}-monitoring"
+}
+
+resource "aws_sns_topic_subscription" "monitoring" {
+  topic_arn = aws_sns_topic.monitoring.arn
+  protocol  = "email"
+  endpoint  = var.alert_email  # Add this to your variables.tf
 }
